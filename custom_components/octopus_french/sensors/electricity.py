@@ -1052,3 +1052,210 @@ class OctopusTempoCurrentRateSensor(CoordinatorEntity, SensorEntity):
         if end_min <= start_min:
             return cur_min >= start_min or cur_min <= end_min
         return start_min <= cur_min <= end_min
+
+
+def _is_slot_hc(slot_time: datetime, hc_ranges: list[dict]) -> bool:
+    """Return True if slot_time falls within any HC range."""
+    cur_min = slot_time.hour * 60 + slot_time.minute
+    for r in hc_ranges:
+        try:
+            sh, sm = r["start"].split(":")[:2]
+            eh, em = r["end"].split(":")[:2]
+            start_min = int(sh) * 60 + int(sm)
+            end_min = int(eh) * 60 + int(em)
+        except (KeyError, ValueError):
+            continue
+        if end_min <= start_min:
+            if cur_min >= start_min or cur_min <= end_min:
+                return True
+        elif start_min <= cur_min <= end_min:
+            return True
+    return False
+
+
+class OctopusElectricity30MinSensor(CoordinatorEntity, SensorEntity):
+    """Sensor injecting 30-min electricity consumption (HP or HC) into HA statistics."""
+
+    def __init__(
+        self,
+        coordinator: OctopusFrenchDataUpdateCoordinator,
+        prm_id: str,
+        sensor_config: SensorEntityDescription,
+        slot_type: str = "hp",
+    ) -> None:
+        """Initialize the 30-min sensor.
+
+        slot_type: "hp" for peak hours, "hc" for off-peak hours.
+        """
+        super().__init__(coordinator)
+        self._prm_id = prm_id
+        self._sensor_config = sensor_config
+        self._slot_type = slot_type
+        self._attr_unique_id = f"{DOMAIN}_{prm_id}_{sensor_config.key}"
+        self._attr_translation_key = sensor_config.key
+        self._attr_has_entity_name = True
+        self._attr_icon = sensor_config.icon
+        self._attr_device_class = sensor_config.device_class
+        self._attr_state_class = sensor_config.state_class
+        self._attr_native_unit_of_measurement = sensor_config.native_unit_of_measurement
+        self._attr_suggested_display_precision = sensor_config.suggested_display_precision
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, prm_id)})
+        self._last_imported_date: str | None = None
+        self._statistics_imported = False
+
+    def _get_hc_ranges(self) -> list[dict]:
+        """Return HC time ranges from contract or offPeakLabel."""
+        data = self.coordinator.data or {}
+        contract_slots = find_contract_hc_slots(data, self._prm_id)
+        if contract_slots:
+            schedule = parse_time_slots(contract_slots)
+        else:
+            off_peak_label = None
+            for meter in data.get("supply_points", {}).get("electricity", []):
+                if meter.get("prm") == self._prm_id:
+                    off_peak_label = meter.get("offPeakLabel")
+                    break
+            if not off_peak_label:
+                return []
+            schedule = parse_off_peak_hours(off_peak_label)
+        return schedule.get("ranges", [])
+
+    async def async_added_to_hass(self) -> None:
+        """When entity is added to hass."""
+        await super().async_added_to_hass()
+        if self.entity_id:
+            self.hass.async_create_task(self._async_import_statistics())
+
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        if self.entity_id and not self._statistics_imported:
+            self.hass.async_create_task(self._async_import_statistics())
+        super()._handle_coordinator_update()
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the last 30-min reading value for this slot type."""
+        readings = self.coordinator.data.get("electricity", {}).get("readings_30min", [])
+        if not readings:
+            return None
+        hc_ranges = self._get_hc_ranges()
+        try:
+            sorted_readings = sorted(readings, key=lambda r: r.get("startAt", ""), reverse=True)
+            for reading in sorted_readings:
+                reading_date = reading.get("startAt")
+                if not reading_date:
+                    continue
+                date_obj = datetime.fromisoformat(reading_date).astimezone(dt_util.DEFAULT_TIME_ZONE)
+                is_hc = _is_slot_hc(date_obj, hc_ranges)
+                if (self._slot_type == "hc") == is_hc:
+                    value = reading.get("value")
+                    return float(value) if value is not None else None
+        except (ValueError, TypeError):
+            pass
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return extra attributes."""
+        readings = self.coordinator.data.get("electricity", {}).get("readings_30min", [])
+        return {
+            "slot_type": self._slot_type,
+            "readings_count": len(readings),
+            "last_imported_date": self._last_imported_date,
+        }
+
+    async def _async_import_statistics(self) -> None:
+        """Import 30-min readings filtered by slot type as HA statistics."""
+        if not self.entity_id:
+            return
+
+        readings = self.coordinator.data.get("electricity", {}).get("readings_30min", [])
+        if not readings:
+            return
+
+        hc_ranges = self._get_hc_ranges()
+        statistic_id = f"{DOMAIN}:{self._prm_id}_energy_30min_{self._slot_type}"
+
+        try:
+            last_stats = await get_instance(self.hass).async_add_executor_job(
+                get_last_statistics, self.hass, 1, statistic_id, False, {"sum", "start"}
+            )
+            if last_stats and statistic_id in last_stats and last_stats[statistic_id]:
+                last_entry = last_stats[statistic_id][0]
+                cumulative_sum = float(last_entry.get("sum") or 0.0)
+                if not self._last_imported_date:
+                    last_start = last_entry.get("start")
+                    if last_start is not None:
+                        self._last_imported_date = datetime.fromtimestamp(
+                            float(last_start), tz=dt_util.UTC
+                        ).isoformat()
+            else:
+                cumulative_sum = 0.0
+        except (OSError, ValueError, TypeError):
+            cumulative_sum = 0.0
+
+        sorted_readings = sorted(readings, key=lambda r: r.get("startAt", ""))
+
+        statistics = []
+        for reading in sorted_readings:
+            reading_date = reading.get("startAt")
+            if not reading_date:
+                continue
+
+            if self._last_imported_date and reading_date <= self._last_imported_date:
+                continue
+
+            try:
+                date_obj = datetime.fromisoformat(reading_date)
+                date_local = date_obj.astimezone(dt_util.DEFAULT_TIME_ZONE)
+                date_utc = date_obj.astimezone(dt_util.UTC).replace(second=0, microsecond=0)
+            except (ValueError, TypeError):
+                continue
+
+            is_hc = _is_slot_hc(date_local, hc_ranges)
+            if (self._slot_type == "hc") != is_hc:
+                continue
+
+            value = reading.get("value")
+            if value is None:
+                continue
+
+            try:
+                kwh = float(value)
+            except (ValueError, TypeError):
+                continue
+
+            if kwh <= 0:
+                continue
+
+            cumulative_sum += kwh
+            statistics.append(StatisticData(start=date_utc, state=kwh, sum=cumulative_sum))
+            self._last_imported_date = reading_date
+
+        if not statistics:
+            _LOGGER.debug("No new 30-min %s statistics to import for %s", self._slot_type, statistic_id)
+            return
+
+        label = "HC (heures creuses)" if self._slot_type == "hc" else "HP (heures pleines)"
+        metadata = StatisticMetaData(
+            mean_type=StatisticMeanType.NONE,
+            has_sum=True,
+            name=f"Octopus Energy 30min {label}",
+            source=DOMAIN,
+            statistic_id=statistic_id,
+            unit_class="energy",
+            unit_of_measurement=self._attr_native_unit_of_measurement,
+        )
+
+        try:
+            async_add_external_statistics(self.hass, metadata, statistics)
+            self._statistics_imported = True
+            _LOGGER.info(
+                "Imported %d 30-min %s statistics for %s (last: %s)",
+                len(statistics),
+                self._slot_type,
+                statistic_id,
+                self._last_imported_date,
+            )
+        except Exception:
+            _LOGGER.exception("Failed to import 30-min statistics for %s", statistic_id)

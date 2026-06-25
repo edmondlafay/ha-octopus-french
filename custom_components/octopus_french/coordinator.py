@@ -89,6 +89,7 @@ class OctopusFrenchDataUpdateCoordinator(DataUpdateCoordinator):
         electricity_start = (first_of_month - timedelta(days=PREVIOUS_MONTH_OVERLAP_DAYS)).isoformat()
         date_end = now.isoformat()
         gas_start = (today_midnight - timedelta(days=365)).isoformat()
+        electricity_30min_start = (today_midnight - timedelta(days=7)).isoformat()
 
         async def fetch_electricity() -> tuple[list, Any]:
             if not electricity_meter_id:
@@ -113,6 +114,24 @@ class OctopusFrenchDataUpdateCoordinator(DataUpdateCoordinator):
                 return [], None
             else:
                 return readings, index
+
+        async def fetch_electricity_30min() -> list:
+            if not electricity_meter_id:
+                return []
+            try:
+                return await self.api_client.get_energy_readings(
+                    account_id,
+                    electricity_30min_start,
+                    date_end,
+                    electricity_meter_id,
+                    utility_type="electricity",
+                    reading_frequency="THIRTY_MIN_INTERVAL",
+                    reading_quality="ACTUAL",
+                    first=500,
+                )
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning("Failed to fetch 30-min electricity data: %s", err)
+                return []
 
         async def fetch_gas() -> list:
             if not gas_meter_id:
@@ -143,9 +162,15 @@ class OctopusFrenchDataUpdateCoordinator(DataUpdateCoordinator):
 
         (
             (electricity_readings, elec_index),
+            electricity_30min_readings,
             gas,
             payment_requests,
-        ) = await asyncio.gather(fetch_electricity(), fetch_gas(), fetch_payments())
+        ) = await asyncio.gather(
+            fetch_electricity(),
+            fetch_electricity_30min(),
+            fetch_gas(),
+            fetch_payments(),
+        )
 
         # Expose active tariffs for the electricity supply point
         tariffs = None
@@ -162,6 +187,7 @@ class OctopusFrenchDataUpdateCoordinator(DataUpdateCoordinator):
 
         account_data["electricity"] = {
             "readings": electricity_readings,
+            "readings_30min": electricity_30min_readings,
             "index": elec_index,
             "tariffs": tariffs,
         }

@@ -123,6 +123,24 @@ ELECTRICITY_SENSORS: tuple[SensorEntityDescription, ...] = (
     ),
 )
 
+ELECTRICITY_30MIN_HP_SENSOR = SensorEntityDescription(
+    key="energy_30min_hp",
+    icon="mdi:chart-bell-curve",
+    device_class=SensorDeviceClass.ENERGY,
+    state_class=SensorStateClass.TOTAL,
+    native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+    suggested_display_precision=3,
+)
+
+ELECTRICITY_30MIN_HC_SENSOR = SensorEntityDescription(
+    key="energy_30min_hc",
+    icon="mdi:chart-bell-curve-cumulative",
+    device_class=SensorDeviceClass.ENERGY,
+    state_class=SensorStateClass.TOTAL,
+    native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+    suggested_display_precision=3,
+)
+
 LATEST_READING_SENSOR = SensorEntityDescription(
     key="latest_reading",
     icon="mdi:calendar-clock",

@@ -23,6 +23,8 @@ from .const import (
 from .coordinator import OctopusFrenchDataUpdateCoordinator
 from .coordinator_intelligent import OctopusIntelligentDataUpdateCoordinator
 from .sensors.descriptions import (
+    ELECTRICITY_30MIN_HC_SENSOR,
+    ELECTRICITY_30MIN_HP_SENSOR,
     ELECTRICITY_INDEX_SENSORS,
     ELECTRICITY_SENSORS,
     GAS_SENSORS,
@@ -31,6 +33,7 @@ from .sensors.descriptions import (
     TEMPO_SENSORS,
 )
 from .sensors.electricity import (
+    OctopusElectricity30MinSensor,
     OctopusElectricityIndexSensor,
     OctopusElectricitySensor,
     OctopusLatestReadingSensor,
@@ -129,6 +132,12 @@ async def async_setup_entry(
 
         entities.append(
             OctopusLatestReadingSensor(coordinator, prm_id, LATEST_READING_SENSOR)
+        )
+        entities.append(
+            OctopusElectricity30MinSensor(coordinator, prm_id, ELECTRICITY_30MIN_HP_SENSOR, slot_type="hp")
+        )
+        entities.append(
+            OctopusElectricity30MinSensor(coordinator, prm_id, ELECTRICITY_30MIN_HC_SENSOR, slot_type="hc")
         )
 
         index_data = coordinator.data.get("electricity", {}).get("index")
