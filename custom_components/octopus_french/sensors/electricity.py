@@ -1196,7 +1196,11 @@ class OctopusElectricity30MinSensor(CoordinatorEntity, SensorEntity):
 
         sorted_readings = sorted(readings, key=lambda r: r.get("startAt", ""))
 
-        statistics = []
+        # Aggregate 30-min slots into hourly buckets (HA requires hour-boundary timestamps).
+        # Track last_imported_date at slot resolution so we don't re-import on next run.
+        hourly: dict[datetime, float] = {}
+        last_date_candidate: str | None = None
+
         for reading in sorted_readings:
             reading_date = reading.get("startAt")
             if not reading_date:
@@ -1208,12 +1212,13 @@ class OctopusElectricity30MinSensor(CoordinatorEntity, SensorEntity):
             try:
                 date_obj = datetime.fromisoformat(reading_date)
                 date_local = date_obj.astimezone(dt_util.DEFAULT_TIME_ZONE)
-                date_utc = date_obj.astimezone(dt_util.UTC).replace(second=0, microsecond=0)
+                hour_utc = date_obj.astimezone(dt_util.UTC).replace(minute=0, second=0, microsecond=0)
             except (ValueError, TypeError):
                 continue
 
             is_hc = _is_slot_hc(date_local, hc_ranges)
             if (self._slot_type == "hc") != is_hc:
+                last_date_candidate = reading_date
                 continue
 
             value = reading.get("value")
@@ -1226,11 +1231,20 @@ class OctopusElectricity30MinSensor(CoordinatorEntity, SensorEntity):
                 continue
 
             if kwh <= 0:
+                last_date_candidate = reading_date
                 continue
 
+            hourly[hour_utc] = hourly.get(hour_utc, 0.0) + kwh
+            last_date_candidate = reading_date
+
+        statistics = []
+        for hour_utc in sorted(hourly):
+            kwh = hourly[hour_utc]
             cumulative_sum += kwh
-            statistics.append(StatisticData(start=date_utc, state=kwh, sum=cumulative_sum))
-            self._last_imported_date = reading_date
+            statistics.append(StatisticData(start=hour_utc, state=kwh, sum=cumulative_sum))
+
+        if last_date_candidate:
+            self._last_imported_date = last_date_candidate
 
         if not statistics:
             _LOGGER.debug("No new 30-min %s statistics to import for %s", self._slot_type, statistic_id)
