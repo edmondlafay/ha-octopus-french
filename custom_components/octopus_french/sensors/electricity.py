@@ -80,12 +80,20 @@ class OctopusElectricitySensor(CoordinatorEntity, SensorEntity):
 
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
-        if (
-            self.entity_id
-            and self._sensor_config.key.startswith(("energy_", "cost_"))
-            and not self._statistics_imported
-        ):
-            self.hass.async_create_task(self._async_import_statistics())
+        if self.entity_id and self._sensor_config.key.startswith(("energy_", "cost_")):
+            # Reset import flag when the month changes so new data gets imported.
+            current_month = self._get_current_month()
+            if self._statistics_imported and current_month != self._current_month:
+                _LOGGER.info(
+                    "New month detected (%s → %s), resetting statistics import flag",
+                    self._current_month,
+                    current_month,
+                )
+                self._statistics_imported = False
+                self._last_imported_date = None
+
+            if not self._statistics_imported:
+                self.hass.async_create_task(self._async_import_statistics())
 
         super()._handle_coordinator_update()
 
@@ -113,20 +121,6 @@ class OctopusElectricitySensor(CoordinatorEntity, SensorEntity):
             return
 
         statistic_id = f"{DOMAIN}:{self._prm_id}_{key}"
-
-        current_month = self._get_current_month()
-        if (
-            self._statistics_imported
-            and self._last_imported_date
-            and current_month != self._current_month
-        ):
-            _LOGGER.info(
-                "New month detected (%s), forcing statistics re-import for %s",
-                current_month,
-                statistic_id,
-            )
-            self._statistics_imported = False
-            self._last_imported_date = None
 
         _LOGGER.debug(
             "Starting statistics import for entity_id: %s (statistic_id: %s)",
@@ -274,6 +268,7 @@ class OctopusElectricitySensor(CoordinatorEntity, SensorEntity):
             async_add_external_statistics(self.hass, metadata, statistics)
 
             self._statistics_imported = True
+            self._current_month = self._get_current_month()
             _LOGGER.info(
                 "Successfully imported %d statistics for %s (last date: %s)",
                 len(statistics),
