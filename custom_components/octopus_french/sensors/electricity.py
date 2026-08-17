@@ -81,7 +81,7 @@ class OctopusElectricitySensor(CoordinatorEntity, SensorEntity):
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
         if self.entity_id and self._sensor_config.key.startswith(("energy_", "cost_")):
-            # Reset import flag when the month changes so new data gets imported.
+            # Reset import flag when the month changes.
             current_month = self._get_current_month()
             if self._statistics_imported and current_month != self._current_month:
                 _LOGGER.info(
@@ -92,8 +92,8 @@ class OctopusElectricitySensor(CoordinatorEntity, SensorEntity):
                 self._statistics_imported = False
                 self._last_imported_date = None
 
-            if not self._statistics_imported:
-                self.hass.async_create_task(self._async_import_statistics())
+            # Always trigger import — _last_imported_date skips already-stored readings.
+            self.hass.async_create_task(self._async_import_statistics())
 
         super()._handle_coordinator_update()
 
