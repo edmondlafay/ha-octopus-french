@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 from typing import Any
 
@@ -26,6 +26,29 @@ from ..utils import find_contract_hc_slots, normalize_consumption_label, parse_o
 from .descriptions import OctopusIndexSensorDescription
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _to_aware(value: str) -> datetime:
+    """Parse an ISO date string into a timezone-aware datetime (naive → local tz)."""
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
+    return parsed
+
+
+def _already_imported(reading_date: str, last_imported_date: str | None) -> bool:
+    """Return True if reading_date is at or before last_imported_date.
+
+    Compares as datetimes: the DB-restored value is UTC while API dates carry a
+    local offset, so plain string comparison is wrong.
+    """
+    if not last_imported_date:
+        return False
+    try:
+        return _to_aware(reading_date) <= _to_aware(last_imported_date)
+    except (ValueError, TypeError):
+        return reading_date <= last_imported_date
+
 
 _COST_TO_CONSUMPTION_LABEL: dict[str, str] = {
     "cost_base":           "BASE",
@@ -200,11 +223,7 @@ class OctopusElectricitySensor(CoordinatorEntity, SensorEntity):
 
                 # Skip readings already stored: cumulative_sum from DB already includes
                 # them, so we must not re-add them to avoid double-counting.
-                # Both _last_imported_date and reading_date are ISO strings → comparable.
-                if (
-                    self._last_imported_date
-                    and reading_date <= self._last_imported_date
-                ):
+                if _already_imported(reading_date, self._last_imported_date):
                     continue
 
             except (ValueError, TypeError, AttributeError) as e:
@@ -1123,7 +1142,8 @@ class OctopusElectricity30MinSensor(CoordinatorEntity, SensorEntity):
 
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
-        if self.entity_id and not self._statistics_imported:
+        # Always trigger import — _last_imported_date skips already-stored slots.
+        if self.entity_id:
             self.hass.async_create_task(self._async_import_statistics())
         super()._handle_coordinator_update()
 
@@ -1181,8 +1201,11 @@ class OctopusElectricity30MinSensor(CoordinatorEntity, SensorEntity):
                 if not self._last_imported_date:
                     last_start = last_entry.get("start")
                     if last_start is not None:
-                        self._last_imported_date = datetime.fromtimestamp(
-                            float(last_start), tz=dt_util.UTC
+                        # Stats are hourly buckets: mark the bucket's :30 slot as
+                        # imported too so it is not re-added after a restart.
+                        self._last_imported_date = (
+                            datetime.fromtimestamp(float(last_start), tz=dt_util.UTC)
+                            + timedelta(minutes=30)
                         ).isoformat()
             else:
                 cumulative_sum = 0.0
@@ -1201,7 +1224,7 @@ class OctopusElectricity30MinSensor(CoordinatorEntity, SensorEntity):
             if not reading_date:
                 continue
 
-            if self._last_imported_date and reading_date <= self._last_imported_date:
+            if _already_imported(reading_date, self._last_imported_date):
                 continue
 
             try:
